@@ -1,5 +1,5 @@
 # share.rs
-A simple fileshare server for sharev
+A simple fileshare server for shareX
 
 ## Build and Run
 
