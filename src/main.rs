@@ -151,11 +151,11 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .data(config.to_owned())
-            .service(find_file)
-            .service(find_file_in_folder)
+            .service(upload_file)
             .service(get_delete_file)
             .service(delete_file)
-            .service(upload_file)
+            .service(find_file)
+            .service(find_file_in_folder)
     }).bind(addr)?.run().await
 }
 
