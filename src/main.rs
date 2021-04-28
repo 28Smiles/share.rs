@@ -4,7 +4,7 @@ use std::io::Write;
 use std::time::SystemTime;
 
 use actix_multipart::Multipart;
-use actix_web::{App, delete, Error, get, HttpServer, post, Result, web};
+use actix_web::{App, delete, Error, get, HttpServer, post, Result, web, HttpResponse};
 use actix_web::web::Query;
 use futures::{StreamExt, TryStreamExt};
 use rand::Rng;
@@ -30,6 +30,16 @@ impl Clone for Config {
     }
 }
 
+trait Alphanumeric {
+    fn is_alphanumeric(&self) -> bool;
+}
+
+impl Alphanumeric for String {
+    fn is_alphanumeric(&self) -> bool {
+        self.chars().all(|c| c.is_alphanumeric())
+    }
+}
+
 #[derive(Deserialize, Clone)]
 struct AuthQuery {
     username: Option<String>,
@@ -39,7 +49,7 @@ struct AuthQuery {
 #[derive(Clone)]
 struct UserData {
     key: String,
-    folder: Option<String>,
+    folder: String,
 }
 
 async fn load_config() -> Config {
@@ -59,26 +69,28 @@ async fn load_config() -> Config {
             .map(|(username, data)| (username, data.into_table().unwrap()))
             .map(move |(username, data)| (username, UserData {
                 key: data.get("key").unwrap().to_owned().into_str().unwrap(),
-                folder: data.get("folder")
-                    .map(|value| value.to_owned().into_str().unwrap()),
+                folder: data.get("folder").unwrap().to_owned().into_str().unwrap(),
             }))
             .collect(),
     }
 }
-
-const ROOT: &str = "root";
 
 fn is_authed<'a>(
     data: &'a Config,
     username: &Option<&str>,
     auth: &Option<&str>,
 ) -> Option<&'a UserData> {
-    let username = String::from(username.unwrap_or(&ROOT));
-    match data.users.get(&username) {
-        Some(userdata) => match auth {
-            Some(provided_auth_key) => if *provided_auth_key == userdata.key { Some(userdata) } else { None },
-            None => None
-        },
+    match *username {
+        Some(username) => {
+            let username = String::from(username);
+            match data.users.get(&username) {
+                Some(userdata) => match auth {
+                    Some(provided_auth_key) => if *provided_auth_key == userdata.key { Some(userdata) } else { None },
+                    None => None
+                },
+                None => None
+            }
+        }
         None => None
     }
 }
@@ -108,22 +120,31 @@ fn is_authed_query<'a>(
     )
 }
 
-async fn remove_file(
-    path: &Path
+fn remove_file(
+    userdata: &UserData,
+    bucket: String,
+    filename: String,
+    config: &Config,
 ) -> web::HttpResponse {
-    std::fs::remove_file(path.to_str().unwrap())
-        .map(|()| web::HttpResponse::Ok().body("File Deleted"))
-        .unwrap_or(web::HttpResponse::NotFound().finish())
+    let path = sub_folder(config, userdata)
+        .join(&bucket)
+        .join(sanitize_filename::sanitize(filename));
+    if path.exists() {
+        std::fs::remove_file(path.to_str().unwrap())
+            .map(|()| std::fs::remove_dir(sub_folder(config, userdata).join(bucket).to_str().unwrap()).unwrap_or(()))
+            .map(|()| std::fs::remove_dir(sub_folder(config, userdata).to_str().unwrap()).unwrap_or(()))
+            .map(|()| web::HttpResponse::Ok().body("File Deleted"))
+            .unwrap_or(web::HttpResponse::NotFound().finish())
+    } else {
+        web::HttpResponse::NotFound().finish()
+    }
 }
 
 fn sub_folder(
     config: &Config,
     data: &UserData,
 ) -> PathBuf {
-    match data.folder.as_ref() {
-        Some(folder) => Path::new(config.storage_folder.as_str()).join(folder),
-        None => PathBuf::new().join(config.storage_folder.as_str())
-    }
+    Path::new(config.storage_folder.as_str()).join(&data.folder)
 }
 
 fn sha256(value: &String) -> String {
@@ -143,7 +164,7 @@ async fn main() -> std::io::Result<()> {
     config.users.iter().for_each(|(username, userdata)|
         println!("username=\"{}\" and folder=\"{}\"",
                  username,
-                 userdata.folder.as_ref().map(|s| s.as_str()).unwrap_or(""))
+                 userdata.folder)
     );
     let storage_folder = Path::new(config.storage_folder.as_str());
     create_dir(storage_folder).unwrap_or(());
@@ -155,71 +176,56 @@ async fn main() -> std::io::Result<()> {
             .service(get_delete_file)
             .service(delete_file)
             .service(find_file)
-            .service(find_file_in_folder)
     }).bind(addr)?.run().await
 }
 
-#[get("/{filename}")]
+#[get("/{user}/{bucket}/{filename}")]
 async fn find_file(
-    web::Path(filename): web::Path<String>,
+    web::Path((user, bucket, filename)): web::Path<(String, String, String)>,
     config: web::Data<Config>,
     req: web::HttpRequest,
 ) -> web::HttpResponse {
-    actix_files::NamedFile::open(format!("{}/{}", &config.storage_folder, filename))
-        .map(|file| file.into_response(&req))
-        .unwrap_or(Ok(web::HttpResponse::NotFound().finish()))
-        .unwrap_or(web::HttpResponse::NotFound().finish())
-}
-
-#[get("/{folder}/{filename}")]
-async fn find_file_in_folder(
-    web::Path((folder, filename)): web::Path<(String, String)>,
-    config: web::Data<Config>,
-    req: web::HttpRequest,
-) -> web::HttpResponse {
-    actix_files::NamedFile::open(format!("{}/{}/{}", &config.storage_folder, folder, filename))
-        .map(|file| file.into_response(&req))
-        .unwrap_or(Ok(web::HttpResponse::NotFound().finish()))
-        .unwrap_or(web::HttpResponse::NotFound().finish())
-}
-
-#[delete("/{filename}")]
-async fn delete_file(
-    web::Path(filename): web::Path<String>,
-    config: web::Data<Config>,
-    request: web::HttpRequest,
-) -> web::HttpResponse {
-    match is_authed_header(config.get_ref(), &request) {
-        Some(userdata) => {
-            let filename = sub_folder(config.get_ref(), userdata)
-                .join(sanitize_filename::sanitize(filename));
-            if filename.exists() {
-                remove_file(&*filename).await
-            } else {
-                web::HttpResponse::NotFound().finish()
-            }
-        }
-        None => web::HttpResponse::Forbidden().finish()
+    let userdata = config.users.get(&*user);
+    if userdata.is_some() && bucket.chars().all(|c| c.is_alphanumeric()) {
+        println!("Serving File from: {}/{}/{}", userdata.unwrap().folder, bucket, filename);
+        actix_files::NamedFile::open(sub_folder(config.get_ref(), userdata.unwrap())
+            .join(bucket)
+            .join(sanitize_filename::sanitize(filename)))
+            .map(|file| file.into_response(&req))
+            .unwrap_or(Ok(web::HttpResponse::NotFound().finish()))
+            .unwrap_or(web::HttpResponse::NotFound().finish())
+    } else {
+        HttpResponse::BadRequest().finish()
     }
 }
 
-#[get("delete/{filename}")]
+#[delete("/{bucket}/{filename}")]
+async fn delete_file(
+    web::Path((bucket, filename)): web::Path<(String, String)>,
+    config: web::Data<Config>,
+    request: web::HttpRequest,
+) -> web::HttpResponse {
+    let userdata = is_authed_header(config.get_ref(), &request);
+    if userdata.is_some() && bucket.is_alphanumeric() {
+        println!("Deleting File from: {}/{}/{}", userdata.unwrap().folder, bucket, filename);
+        remove_file(userdata.unwrap(), bucket, filename, &config)
+    } else {
+        web::HttpResponse::Forbidden().finish()
+    }
+}
+
+#[get("delete/{bucket}/{filename}")]
 async fn get_delete_file(
-    web::Path(filename): web::Path<String>,
+    web::Path((bucket, filename)): web::Path<(String, String)>,
     config: web::Data<Config>,
     query: Query<AuthQuery>,
 ) -> web::HttpResponse {
-    match is_authed_query(config.get_ref(), &query) {
-        Some(userdata) => {
-            let filename = sub_folder(config.get_ref(), userdata)
-                .join(sanitize_filename::sanitize(filename));
-            if filename.exists() {
-                remove_file(&*filename).await
-            } else {
-                web::HttpResponse::NotFound().finish()
-            }
-        }
-        None => web::HttpResponse::Forbidden().finish()
+    let userdata = is_authed_query(config.get_ref(), &query);
+    if userdata.is_some() && bucket.is_alphanumeric() {
+        println!("Deleting File from: {}/{}/{}", userdata.unwrap().folder, bucket, filename);
+        remove_file(userdata.unwrap(), bucket, filename, &config)
+    } else {
+        web::HttpResponse::Forbidden().finish()
     }
 }
 
@@ -234,26 +240,22 @@ async fn upload_file(
             let mut files: Vec<String> = Vec::new();
             while let Ok(Some(mut field)) = payload.try_next().await {
                 let content_type = field.content_disposition().unwrap();
-                let filename = content_type.get_filename().unwrap();
+                let filename = sanitize_filename::sanitize(content_type.get_filename().unwrap());
                 let time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
                 let random: String = rand::thread_rng().sample_iter(rand::distributions::Alphanumeric).take(128).collect();
-                let store_filename = sanitize_filename::sanitize(format!(
-                    "{}.{}",
-                    sha256(&format!("{}{}", time, random)),
-                    &filename.split(".").last().unwrap()
-                ));
+                let bucket: String = sha256(&format!("{}{}", time, random));
+                println!("Uploading File to: {}/{}/{}", userdata.folder, bucket, filename);
                 let filepath = sub_folder(config.get_ref(), userdata);
                 create_dir(&filepath).unwrap_or(());
-                let filepath = filepath.join(sanitize_filename::sanitize(store_filename.clone()));
+                let filepath = filepath.join(&bucket);
+                create_dir(&filepath).unwrap_or(());
+                let filepath = filepath.join(&filename);
                 let mut f = web::block(move || File::create(&*filepath)).await.unwrap();
                 while let Some(chunk) = field.next().await {
                     let data = chunk.unwrap();
                     f = web::block(move || f.write_all(&data).map(|_| f)).await?;
                 }
-                files.push(match &userdata.folder {
-                    Some(folder) => format!("{}/{}", folder, store_filename),
-                    None => store_filename
-                });
+                files.push(format!("{}/{}/{}", userdata.folder, bucket, filename));
             }
             Ok(web::HttpResponse::Ok().body(files.join(",")))
         }
