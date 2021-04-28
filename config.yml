@@ -5,5 +5,3 @@ users:
   user1:
     folder: user1
     key: mysecret
-  root:
-    key: mysecret
