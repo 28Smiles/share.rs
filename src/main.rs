@@ -42,7 +42,7 @@ impl Alphanumeric for String {
 
 #[derive(Deserialize, Clone)]
 struct AuthQuery {
-    username: Option<String>,
+    username: String,
     auth: String,
 }
 
@@ -77,20 +77,16 @@ async fn load_config() -> Config {
 
 fn is_authed<'a>(
     data: &'a Config,
-    username: &Option<&str>,
-    auth: &Option<&str>,
+    username: &str,
+    auth: &str,
 ) -> Option<&'a UserData> {
-    match *username {
-        Some(username) => {
-            let username = String::from(username);
-            match data.users.get(&username) {
-                Some(userdata) => match auth {
-                    Some(provided_auth_key) => if *provided_auth_key == userdata.key { Some(userdata) } else { None },
-                    None => None
-                },
-                None => None
-            }
-        }
+    let username = String::from(username);
+    match data.users.get(&username) {
+        Some(userdata) => if auth == userdata.key {
+            Some(userdata)
+        } else {
+            None
+        },
         None => None
     }
 }
@@ -103,15 +99,19 @@ fn is_authed_header<'a>(
     let username = headers.get("user").map(|user| user.to_str().unwrap());
     let auth = headers.get("auth").map(|user| user.to_str().unwrap());
 
-    is_authed(data, &username, &auth)
+    if username.is_some() && auth.is_some() {
+        is_authed(data, &username.unwrap(), &auth.unwrap())
+    } else {
+        None
+    }
 }
 
 fn is_authed_query<'a>(
     data: &'a Config,
     auth_query: &AuthQuery,
 ) -> Option<&'a UserData> {
-    let username = auth_query.username.as_ref().map(|s| s.as_str());
-    let auth = Some(auth_query.auth.as_str());
+    let username = auth_query.username.as_str();
+    let auth = auth_query.auth.as_str();
 
     is_authed(
         data,
