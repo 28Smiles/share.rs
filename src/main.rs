@@ -10,6 +10,7 @@ use futures::{StreamExt, TryStreamExt};
 use rand::Rng;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use urlencoding::encode;
 
 
 struct Config {
@@ -255,7 +256,12 @@ async fn upload_file(
                     let data = chunk.unwrap();
                     f = web::block(move || f.write_all(&data).map(|_| f)).await?;
                 }
-                files.push(format!("{}/{}/{}", userdata.folder, bucket, filename));
+                files.push(format!(
+                    "{}/{}/{}",
+                    encode(&*userdata.folder),
+                    encode(&*bucket),
+                    encode(&*filename)
+                ));
             }
             Ok(web::HttpResponse::Ok().body(files.join(",")))
         }
