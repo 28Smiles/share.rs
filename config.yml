@@ -1,6 +1,6 @@
 host: localhost
 port: 8080
-storage-folder: store
+storage_folder: store
 users:
   user1:
     folder: user1

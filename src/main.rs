@@ -1,79 +1,22 @@
-use std::collections::HashMap;
-use std::fs::{File, create_dir};
-use std::io::Write;
-use std::time::SystemTime;
+mod config;
+mod store;
+
+use std::fs::create_dir;
 
 use actix_multipart::Multipart;
-use actix_web::{App, delete, Error, get, HttpServer, post, Result, web, HttpResponse};
+use actix_web::{App, delete, Error, get, HttpServer, post, Result, web, HttpResponse, HttpRequest};
 use actix_web::web::Query;
-use futures::{StreamExt, TryStreamExt};
-use rand::Rng;
+use futures::TryStreamExt;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use urlencoding::encode;
-
-
-struct Config {
-    host: String,
-    port: i64,
-    storage_folder: String,
-    users: HashMap<String, UserData>,
-}
-
-impl Clone for Config {
-    fn clone(&self) -> Self {
-        Config {
-            host: self.host.clone(),
-            port: self.port,
-            storage_folder: self.storage_folder.clone(),
-            users: self.users.iter().map(|(username, data)| (username.clone(), data.clone())).collect(),
-        }
-    }
-}
-
-trait Alphanumeric {
-    fn is_alphanumeric(&self) -> bool;
-}
-
-impl Alphanumeric for String {
-    fn is_alphanumeric(&self) -> bool {
-        self.chars().all(|c| c.is_alphanumeric())
-    }
-}
+use crate::config::{Config, UserData};
+use crate::store::{Bucket, StorageFile, UserDir};
 
 #[derive(Deserialize, Clone)]
 struct AuthQuery {
     username: String,
     auth: String,
-}
-
-#[derive(Clone)]
-struct UserData {
-    key: String,
-    folder: String,
-}
-
-async fn load_config() -> Config {
-    let mut settings = config::Config::default();
-    settings.merge(config::File::with_name("config")).unwrap();
-
-    let host = settings.get_str("host").unwrap();
-    let port = settings.get_int("port").unwrap();
-    let storage_folder = settings.get_str("storage-folder").unwrap();
-    let users = settings.get_table("users").unwrap();
-
-    Config {
-        host,
-        port,
-        storage_folder,
-        users: users.into_iter()
-            .map(|(username, data)| (username, data.into_table().unwrap()))
-            .map(move |(username, data)| (username, UserData {
-                key: data.get("key").unwrap().to_owned().into_str().unwrap(),
-                folder: data.get("folder").unwrap().to_owned().into_str().unwrap(),
-            }))
-            .collect(),
-    }
 }
 
 fn is_authed<'a>(
@@ -94,10 +37,10 @@ fn is_authed<'a>(
 
 fn is_authed_header<'a>(
     data: &'a Config,
-    request: &web::HttpRequest,
+    request: &HttpRequest,
 ) -> Option<&'a UserData> {
     let headers = request.headers();
-    let username = headers.get("user").map(|user| user.to_str().unwrap());
+    let username = headers.get("username").map(|user| user.to_str().unwrap());
     let auth = headers.get("auth").map(|user| user.to_str().unwrap());
 
     if username.is_some() && auth.is_some() {
@@ -121,43 +64,9 @@ fn is_authed_query<'a>(
     )
 }
 
-fn remove_file(
-    userdata: &UserData,
-    bucket: String,
-    filename: String,
-    config: &Config,
-) -> web::HttpResponse {
-    let path = sub_folder(config, userdata)
-        .join(&bucket)
-        .join(sanitize_filename::sanitize(filename));
-    if path.exists() {
-        std::fs::remove_file(path.to_str().unwrap())
-            .map(|()| std::fs::remove_dir(sub_folder(config, userdata).join(bucket).to_str().unwrap()).unwrap_or(()))
-            .map(|()| std::fs::remove_dir(sub_folder(config, userdata).to_str().unwrap()).unwrap_or(()))
-            .map(|()| web::HttpResponse::Ok().body("File Deleted"))
-            .unwrap_or(web::HttpResponse::NotFound().finish())
-    } else {
-        web::HttpResponse::NotFound().finish()
-    }
-}
-
-fn sub_folder(
-    config: &Config,
-    data: &UserData,
-) -> PathBuf {
-    Path::new(config.storage_folder.as_str()).join(&data.folder)
-}
-
-fn sha256(value: &String) -> String {
-    base32::encode(
-        base32::Alphabet::RFC4648 { padding: false },
-        ring::digest::digest(&ring::digest::SHA256, value.as_bytes()).as_ref(),
-    ).to_lowercase()
-}
-
 #[actix_web::main]
-async fn main() -> std::io::Result<()> {
-    let config = load_config().await;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load()?;
 
     let addr = format!("{}:{}", config.host, config.port);
     println!("Starting Server at {}", addr);
@@ -172,61 +81,74 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .data(config.to_owned())
+            .app_data(web::Data::new(config.clone()))
             .service(upload_file)
             .service(get_delete_file)
             .service(delete_file)
             .service(find_file)
-    }).bind(addr)?.run().await
+    }).bind(addr)?.run().await?;
+
+    Ok(())
 }
 
 #[get("/{user}/{bucket}/{filename}")]
 async fn find_file(
-    web::Path((user, bucket, filename)): web::Path<(String, String, String)>,
+    path: web::Path<(String, String, String)>,
     config: web::Data<Config>,
-    req: web::HttpRequest,
-) -> web::HttpResponse {
-    let userdata = config.users.get(&*user);
-    if userdata.is_some() && bucket.chars().all(|c| c.is_alphanumeric()) {
-        println!("Serving File from: {}/{}/{}", userdata.unwrap().folder, bucket, filename);
-        actix_files::NamedFile::open(sub_folder(config.get_ref(), userdata.unwrap())
-            .join(bucket)
-            .join(sanitize_filename::sanitize(filename)))
-            .map(|file| file.into_response(&req))
-            .unwrap_or(Ok(web::HttpResponse::NotFound().finish()))
-            .unwrap_or(web::HttpResponse::NotFound().finish())
+    req: HttpRequest,
+) -> HttpResponse {
+    let (user, bucket, filename) = path.into_inner();
+    if let Some(userdata) = config.users.get(&*user) {
+        let user_dir = UserDir::new(&config, userdata);
+        let bucket = Bucket::new(&user_dir, Some(bucket)).unwrap();
+        let storage_file = StorageFile::new(&bucket, filename);
+
+        println!("Attempt Serving File from: {}/{}/{}", &userdata.folder, &bucket.name, &storage_file.name);
+        storage_file.serve(&req).await
     } else {
-        HttpResponse::BadRequest().finish()
+        HttpResponse::NotFound().finish()
     }
 }
 
 #[delete("/{bucket}/{filename}")]
 async fn delete_file(
-    web::Path((bucket, filename)): web::Path<(String, String)>,
+    path: web::Path<(String, String)>,
     config: web::Data<Config>,
-    request: web::HttpRequest,
-) -> web::HttpResponse {
-    let userdata = is_authed_header(config.get_ref(), &request);
-    if userdata.is_some() && bucket.is_alphanumeric() {
-        println!("Deleting File from: {}/{}/{}", userdata.unwrap().folder, bucket, filename);
-        remove_file(userdata.unwrap(), bucket, filename, &config)
+    request: HttpRequest,
+) -> Result<HttpResponse, Error> {
+    let (bucket, filename) = path.into_inner();
+    if let Some(userdata) = is_authed_header(config.get_ref(), &request) {
+        let user_dir = UserDir::new(&config, userdata);
+        let bucket = Bucket::new(&user_dir, Some(bucket)).unwrap();
+        let storage_file = StorageFile::new(&bucket, filename);
+
+        println!("Deleting File from: {}/{}/{}", &userdata.folder, &bucket.name, &storage_file.name);
+        storage_file.delete().await?;
+
+        Ok(HttpResponse::Ok().body("File Deleted"))
     } else {
-        web::HttpResponse::Forbidden().finish()
+        Ok(HttpResponse::Forbidden().finish())
     }
 }
 
 #[get("delete/{bucket}/{filename}")]
 async fn get_delete_file(
-    web::Path((bucket, filename)): web::Path<(String, String)>,
+    path: web::Path<(String, String)>,
     config: web::Data<Config>,
     query: Query<AuthQuery>,
-) -> web::HttpResponse {
-    let userdata = is_authed_query(config.get_ref(), &query);
-    if userdata.is_some() && bucket.is_alphanumeric() {
-        println!("Deleting File from: {}/{}/{}", userdata.unwrap().folder, bucket, filename);
-        remove_file(userdata.unwrap(), bucket, filename, &config)
+) -> Result<HttpResponse, Error> {
+    let (bucket, filename) = path.into_inner();
+    if let Some(userdata) = is_authed_query(config.get_ref(), &query) {
+        let user_dir = UserDir::new(&config, userdata);
+        let bucket = Bucket::new(&user_dir, Some(bucket)).unwrap();
+        let storage_file = StorageFile::new(&bucket, filename);
+
+        println!("Deleting File from: {}/{}/{}", &userdata.folder, &bucket.name, &storage_file.name);
+        storage_file.delete().await?;
+
+        Ok(HttpResponse::Ok().body("File Deleted"))
     } else {
-        web::HttpResponse::Forbidden().finish()
+        Ok(HttpResponse::Forbidden().finish())
     }
 }
 
@@ -234,37 +156,321 @@ async fn get_delete_file(
 async fn upload_file(
     mut payload: Multipart,
     config: web::Data<Config>,
-    request: web::HttpRequest,
-) -> Result<web::HttpResponse, Error> {
-    match is_authed_header(config.get_ref(), &request) {
-        Some(userdata) => {
-            let mut files: Vec<String> = Vec::new();
-            while let Ok(Some(mut field)) = payload.try_next().await {
-                let content_type = field.content_disposition().unwrap();
-                let filename = sanitize_filename::sanitize(content_type.get_filename().unwrap());
-                let time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
-                let random: String = rand::thread_rng().sample_iter(rand::distributions::Alphanumeric).take(128).collect();
-                let bucket: String = sha256(&format!("{}{}", time, random));
-                println!("Uploading File to: {}/{}/{}", userdata.folder, bucket, filename);
-                let filepath = sub_folder(config.get_ref(), userdata);
-                create_dir(&filepath).unwrap_or(());
-                let filepath = filepath.join(&bucket);
-                create_dir(&filepath).unwrap_or(());
-                let filepath = filepath.join(&filename);
-                let mut f = web::block(move || File::create(&*filepath)).await.unwrap();
-                while let Some(chunk) = field.next().await {
-                    let data = chunk.unwrap();
-                    f = web::block(move || f.write_all(&data).map(|_| f)).await?;
-                }
-                files.push(format!(
-                    "{}/{}/{}",
-                    encode(&*userdata.folder),
-                    encode(&*bucket),
-                    encode(&*filename)
-                ));
-            }
-            Ok(web::HttpResponse::Ok().body(files.join(",")))
+    request: HttpRequest,
+) -> Result<HttpResponse, Error> {
+    if let Some(user_data) =  is_authed_header(config.get_ref(), &request) {
+        let mut files: Vec<String> = Vec::new();
+        while let Ok(Some(mut field)) = payload.try_next().await {
+            let content_type = field.content_disposition();
+            let user_dir = UserDir::new(&config, user_data);
+            let bucket = Bucket::new(&user_dir, None).unwrap();
+            let storage_file = StorageFile::new(&bucket, content_type.get_filename().unwrap().into());
+
+            println!("Uploading File to: {}/{}/{}", user_data.folder, &bucket.name, &storage_file.name);
+            storage_file.write(&mut field).await?;
+
+            files.push(format!(
+                "{}/{}/{}",
+                encode(&*user_data.folder),
+                encode(&*bucket.name),
+                encode(&*storage_file.name)
+            ));
         }
-        None => Ok(web::HttpResponse::Forbidden().finish())
+        Ok(HttpResponse::Ok().body(files.join(",")))
+    } else {
+        Ok(HttpResponse::Forbidden().finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    mod test_find_file {
+        use std::io::Write;
+        use actix_web::{App, test, web};
+        use actix_web::http::StatusCode;
+        use crate::{Bucket, Config, find_file, StorageFile, UserDir};
+
+        #[actix_web::test]
+        async fn file_404() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(find_file)
+            ).await;
+
+            let (user, _) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let req = test::TestRequest::get()
+                .uri(&*format!("/{}/bucket/file.txt", user))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[actix_web::test]
+        async fn user_404() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(find_file)
+            ).await;
+
+            let req = test::TestRequest::get()
+                .uri("/whothat/bucket/file.txt")
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[actix_web::test]
+        async fn file_200() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(find_file)
+            ).await;
+
+            let filename = "file.txt";
+            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let user_dir = UserDir::new(&config, user_data);
+            let bucket = Bucket::new(&user_dir, None).unwrap();
+            let storage_file = StorageFile::new(&bucket, filename.into());
+            {
+                let mut file = storage_file.open(true).await.unwrap();
+                file = web::block(move || file.write_all(b"This is a testfile!").map(|_| file)).await.unwrap().unwrap();
+                web::block(move || file.flush()).await.unwrap().unwrap();
+            }
+
+            let req = test::TestRequest::get()
+                .uri(&*format!("/{}/{}/{}", user, &bucket.name, &storage_file.name))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            storage_file.delete().await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    mod test_get_delete_file {
+        use std::io::Write;
+        use actix_web::{App, test, web};
+        use actix_web::http::StatusCode;
+        use crate::{Bucket, Config, get_delete_file, StorageFile, UserDir};
+
+        #[actix_web::test]
+        async fn file_200() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(get_delete_file)
+            ).await;
+
+            let filename = "file.txt";
+            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let user_dir = UserDir::new(&config, user_data);
+            let bucket = Bucket::new(&user_dir, None).unwrap();
+            let storage_file = StorageFile::new(&bucket, filename.into());
+            {
+                let mut file = storage_file.open(true).await.unwrap();
+                file = web::block(move || file.write_all(b"This is a testfile!").map(|_| file)).await.unwrap().unwrap();
+                web::block(move || file.flush()).await.unwrap().unwrap();
+            }
+
+            let req = test::TestRequest::get()
+                .uri(&*format!("/delete/{}/{}?username={}&auth={}", &bucket.name, &storage_file.name, user, &user_data.key))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert!(storage_file.open_path(false).await.is_none());
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        #[actix_web::test]
+        async fn file_404() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(get_delete_file)
+            ).await;
+
+            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let req = test::TestRequest::get()
+                .uri(&*format!("/delete/bucket/file.txt?username={}&auth={}", user, &user_data.key))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[actix_web::test]
+        async fn file_403_auth() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(get_delete_file)
+            ).await;
+
+            let (user, _) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let req = test::TestRequest::get()
+                .uri(&*format!("/delete/bucket/file.txt?username={}&auth=456", user))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[actix_web::test]
+        async fn file_403_user() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(get_delete_file)
+            ).await;
+
+            let (_, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let req = test::TestRequest::get()
+                .uri(&*format!("/delete/bucket/file.txt?username=someone&auth={}", &user_data.key))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[actix_web::test]
+        async fn file_400_user() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(get_delete_file)
+            ).await;
+
+            let req = test::TestRequest::get()
+                .uri("/delete/bucket/file.txt")
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    mod test_delete_file {
+        use std::io::Write;
+        use actix_web::{App, test, web};
+        use actix_web::http::StatusCode;
+        use crate::{Bucket, Config, delete_file, StorageFile, UserDir};
+
+        #[actix_web::test]
+        async fn file_200() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(delete_file)
+            ).await;
+
+            let filename = "file.txt";
+            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let user_dir = UserDir::new(&config, user_data);
+            let bucket = Bucket::new(&user_dir, None).unwrap();
+            let storage_file = StorageFile::new(&bucket, filename.into());
+            {
+                let mut file = storage_file.open(true).await.unwrap();
+                file = web::block(move || file.write_all(b"This is a testfile!").map(|_| file)).await.unwrap().unwrap();
+                web::block(move || file.flush()).await.unwrap().unwrap();
+            }
+
+            let req = test::TestRequest::delete()
+                .uri(&*format!("/{}/{}", &bucket.name, &storage_file.name))
+                .insert_header(("username", user.clone()))
+                .insert_header(("auth", user_data.key.clone()))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert!(storage_file.open_path(false).await.is_none());
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        #[actix_web::test]
+        async fn file_404() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(delete_file)
+            ).await;
+
+            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let req = test::TestRequest::delete()
+                .uri("/bucket/file.txt")
+                .insert_header(("username", user.clone()))
+                .insert_header(("auth", user_data.key.clone()))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[actix_web::test]
+        async fn file_403() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(delete_file)
+            ).await;
+
+            let req = test::TestRequest::delete()
+                .uri("/bucket/file.txt")
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[actix_web::test]
+        async fn file_403_user() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(delete_file)
+            ).await;
+
+            let (user, _) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let req = test::TestRequest::delete()
+                .uri("/bucket/file.txt")
+                .insert_header(("username", user.clone()))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
+
+        #[actix_web::test]
+        async fn file_403_auth() {
+            let config = Config::default();
+            let app = test::init_service(
+                App::new()
+                    .app_data(web::Data::new(config.clone()))
+                    .service(delete_file)
+            ).await;
+
+            let (_, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let req = test::TestRequest::delete()
+                .uri("/bucket/file.txt")
+                .insert_header(("auth", user_data.key.clone()))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        }
     }
 }
