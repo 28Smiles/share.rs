@@ -57,3 +57,22 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::Config;
+
+    #[test]
+    fn test_config_load() {
+        let config = Config::load().unwrap();
+        assert_eq!(&config.host, "localhost");
+        assert_eq!(config.port, 8080);
+        assert_eq!(&config.storage_folder, "store");
+        assert_eq!(config.users.len(), 1);
+
+        let (user, user_data) = *(&config.users).iter().peekable().peek().unwrap();
+        assert_eq!(user, "user1");
+        assert_eq!(&user_data.folder, "user1");
+        assert_eq!(&user_data.key, "mysecret");
+    }
+}
