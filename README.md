@@ -3,7 +3,7 @@
 [![Latest Stable](https://img.shields.io/github/v/release/28Smiles/share.rs?label=latest%20stable)](https://github.com/28Smiles/share.rs/releases/latest)
 [![Latest Release](https://img.shields.io/github/v/release/28Smiles/share.rs?include_prereleases&label=latest%20release)](https://github.com/28Smiles/share.rs/releases)
 [![codecov](https://codecov.io/gh/28Smiles/share.rs/branch/master/graph/badge.svg?token=Td24qudkuq)](https://codecov.io/gh/28Smiles/share.rs)
-
+![](https://repository-images.githubusercontent.com/294570798/f919e28f-667e-4e38-bce0-c2885f0ad120)
 # share.rs
 A simple fileshare server for shareX
 
