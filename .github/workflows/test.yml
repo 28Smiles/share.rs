@@ -51,18 +51,6 @@ jobs:
         cd staging; zip shares-windows.zip shares.exe
         tar -cvzf shares-windows.tar.gz shares.exe
         rm shares.exe
-    - name: Build-musl macOS x86
-      uses: Shogan/rust-musl-action@v1.0.2
-      with:
-        args:
-          cargo build --target x86_64-apple-darwin --verbose --release
-    - name: Create MacOS artifacts
-      run: |
-        cp target/x86_64-apple-darwin/release/shares staging/shares
-        cd staging
-        zip shares-macos.zip shares
-        tar -cvzf shares-macos.tar.gz shares
-        rm shares
     - uses: actions/upload-artifact@v2
       with:
         name: package
