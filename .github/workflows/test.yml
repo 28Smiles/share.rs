@@ -19,12 +19,20 @@ jobs:
         rustup target add x86_64-unknown-linux-gnu
         rustup component add clippy
         rustup component add rustfmt
+        rustup component add llvm-tools-preview
+    - name: Install Grcov
+      run: curl -L https://github.com/mozilla/grcov/releases/latest/download/grcov-x86_64-unknown-linux-gnu.tar.bz2 | tar jxf -
     - name: RustFmt
       run: cargo fmt --check
     - name: RustFmt
       run: cargo clippy --all-targets --all-features -- -D warnings
     - name: Run tests
-      run: cargo test --verbose
+      run: |
+        export RUSTFLAGS="-Cinstrument-coverage"
+        cargo build --verbose
+        LLVM_PROFILE_FILE="shares-%p-%m.profraw" cargo test --verbose
+        ./grcov . --binary-path ./target/debug/ -s . -t lcov --branch --ignore-not-existing --ignore "/*" -o lcov.info
+        bash <(curl -s https://codecov.io/bash) -f lcov.info
     - name: Build Linux
       run: cargo build --target x86_64-unknown-linux-gnu --verbose --release
     - name: Create Linux artifacts
