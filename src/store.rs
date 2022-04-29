@@ -1,26 +1,23 @@
+use crate::{Config, UserData};
+use actix_files::NamedFile;
+use actix_multipart::Field;
+use actix_web::error::{ErrorInternalServerError, ErrorNotFound};
+use actix_web::{web, HttpRequest, HttpResponse};
+use futures::StreamExt;
+use rand::Rng;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use actix_files::NamedFile;
-use actix_multipart::Field;
-use actix_web::error::{ErrorInternalServerError, ErrorNotFound};
-use actix_web::{HttpRequest, HttpResponse, web};
-use futures::{StreamExt};
-use rand::Rng;
-use crate::{Config, UserData};
 
 pub struct UserDir<'a, 'b> {
     config: &'a Config,
-    user_data: &'b UserData
+    user_data: &'b UserData,
 }
 
-impl <'a, 'b>UserDir<'a, 'b> {
+impl<'a, 'b> UserDir<'a, 'b> {
     pub fn new(config: &'a Config, user_data: &'b UserData) -> Self {
-        UserDir {
-            config,
-            user_data
-        }
+        UserDir { config, user_data }
     }
 
     pub fn path(&self) -> PathBuf {
@@ -31,7 +28,8 @@ impl <'a, 'b>UserDir<'a, 'b> {
         let path = self.path();
         if create {
             let path = path.clone();
-            web::block(move || fs::create_dir(&path)).await
+            web::block(move || fs::create_dir(&path))
+                .await
                 .unwrap_or(Ok(()))
                 .unwrap_or(());
         }
@@ -50,10 +48,14 @@ impl <'a, 'b>UserDir<'a, 'b> {
         if let Some(path) = self.open(false).await {
             let files = {
                 let path = path.clone();
-                web::block(move || fs::read_dir(&path)).await.unwrap()?.count()
+                web::block(move || fs::read_dir(&path))
+                    .await
+                    .unwrap()?
+                    .count()
             };
             if files == 0 {
-                web::block(move || fs::remove_dir(&path)).await
+                web::block(move || fs::remove_dir(&path))
+                    .await
                     .unwrap()
                     .map_err(|_| ErrorInternalServerError("Can't Delete User Dir"))
             } else {
@@ -67,27 +69,27 @@ impl <'a, 'b>UserDir<'a, 'b> {
 
 pub struct Bucket<'a, 'b, 'c> {
     user_dir: &'a UserDir<'b, 'c>,
-    pub(crate) name: String
+    pub(crate) name: String,
 }
 
-impl <'a, 'b, 'c>Bucket<'a, 'b, 'c> {
+impl<'a, 'b, 'c> Bucket<'a, 'b, 'c> {
     pub fn new(user_dir: &'a UserDir<'b, 'c>, name: Option<String>) -> Option<Self> {
         if let Some(name) = name {
             if name.chars().all(|char| char.is_alphanumeric()) {
-                Some(Bucket {
-                    user_dir,
-                    name
-                })
+                Some(Bucket { user_dir, name })
             } else {
                 None
             }
         } else {
             Some(Bucket {
                 user_dir,
-                name: String::from_utf8(rand::thread_rng()
-                    .sample_iter(rand::distributions::Alphanumeric)
-                    .take(16)
-                    .collect()).unwrap()
+                name: String::from_utf8(
+                    rand::thread_rng()
+                        .sample_iter(rand::distributions::Alphanumeric)
+                        .take(16)
+                        .collect(),
+                )
+                .unwrap(),
             })
         }
     }
@@ -97,7 +99,8 @@ impl <'a, 'b, 'c>Bucket<'a, 'b, 'c> {
             let path = path.join(&self.name);
             if create {
                 let path = path.clone();
-                web::block(move || fs::create_dir(&path)).await
+                web::block(move || fs::create_dir(&path))
+                    .await
                     .unwrap_or(Ok(()))
                     .unwrap_or(());
             }
@@ -119,10 +122,14 @@ impl <'a, 'b, 'c>Bucket<'a, 'b, 'c> {
         if let Some(path) = self.open(false).await {
             let files = {
                 let path = path.clone();
-                web::block(move || fs::read_dir(&path)).await.unwrap()?.count()
+                web::block(move || fs::read_dir(&path))
+                    .await
+                    .unwrap()?
+                    .count()
             };
             if files == 0 {
-                web::block(move || fs::remove_dir(&path)).await
+                web::block(move || fs::remove_dir(&path))
+                    .await
                     .unwrap()
                     .map_err(|_| ErrorInternalServerError("Can't Delete Bucket"))?;
 
@@ -138,14 +145,14 @@ impl <'a, 'b, 'c>Bucket<'a, 'b, 'c> {
 
 pub struct StorageFile<'a, 'b, 'c, 'd> {
     bucket: &'a Bucket<'b, 'c, 'd>,
-    pub name: String
+    pub name: String,
 }
 
-impl <'a, 'b, 'c, 'd>StorageFile<'a, 'b, 'c, 'd> {
+impl<'a, 'b, 'c, 'd> StorageFile<'a, 'b, 'c, 'd> {
     pub fn new(bucket: &'a Bucket<'b, 'c, 'd>, name: String) -> Self {
         StorageFile {
             bucket,
-            name: sanitize_filename::sanitize(name)
+            name: sanitize_filename::sanitize(name),
         }
     }
 
@@ -160,13 +167,17 @@ impl <'a, 'b, 'c, 'd>StorageFile<'a, 'b, 'c, 'd> {
                 if create {
                     None
                 } else {
-                    web::block(move || File::open(&path)).await.unwrap()
+                    web::block(move || File::open(&path))
+                        .await
+                        .unwrap()
                         .map(|file| Some(file))
                         .unwrap_or(None)
                 }
             } else {
                 if create {
-                    web::block(move || File::create(&path)).await.unwrap()
+                    web::block(move || File::create(&path))
+                        .await
+                        .unwrap()
                         .map(|file| Some(file))
                         .unwrap_or(None)
                 } else {
@@ -210,7 +221,8 @@ impl <'a, 'b, 'c, 'd>StorageFile<'a, 'b, 'c, 'd> {
 
     pub async fn delete(&self) -> Result<(), actix_web::error::Error> {
         if let Some(path) = self.open_path(false).await {
-            web::block(move || fs::remove_file(&path)).await
+            web::block(move || fs::remove_file(&path))
+                .await
                 .unwrap()
                 .map_err(|_| ErrorInternalServerError("File Can not ne deleted"))?;
 

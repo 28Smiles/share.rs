@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use std::fs;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct Config {
@@ -20,11 +20,14 @@ pub struct UserData {
 impl Default for UserData {
     fn default() -> Self {
         UserData {
-            key: String::from_utf8(rand::thread_rng()
-                .sample_iter(rand::distributions::Alphanumeric)
-                .take(512)
-                .collect()).unwrap(),
-            folder: "default_user".to_string()
+            key: String::from_utf8(
+                rand::thread_rng()
+                    .sample_iter(rand::distributions::Alphanumeric)
+                    .take(512)
+                    .collect(),
+            )
+            .unwrap(),
+            folder: "default_user".to_string(),
         }
     }
 }
@@ -35,9 +38,7 @@ impl Default for Config {
             host: "localhost".to_string(),
             port: 8080,
             storage_folder: "store".to_string(),
-            users: HashMap::from([
-                ("default_user".to_string(), UserData::default())
-            ])
+            users: HashMap::from([("default_user".to_string(), UserData::default())]),
         }
     }
 }
