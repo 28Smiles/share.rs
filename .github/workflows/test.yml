@@ -1,0 +1,61 @@
+name: Main
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install targets
+      run: |
+        sudo apt-get install -y mingw-w64
+        rustup target add x86_64-pc-windows-gnu
+        rustup target add x86_64-unknown-linux-gnu
+        rustup component add clippy
+        rustup component add rustfmt
+    - name: RustFmt
+      run: cargo fmt --check
+    - name: RustFmt
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Build Linux
+      run: cargo build --target x86_64-unknown-linux-gnu --verbose --release
+    - name: Create Linux artifacts
+      run: |
+        mkdir staging
+        cp target/x86_64-unknown-linux-gnu/release/shares staging/shares
+        cd staging
+        zip shares-linux.zip shares
+        tar -cvzf shares-linux.tar.gz shares
+        rm shares
+    - name: Build Windows
+      run: cargo build --target x86_64-pc-windows-gnu --verbose --release
+    - name: Create Windows artifacts
+      run: |
+        cp target/x86_64-pc-windows-gnu/release/shares.exe staging/shares.exe
+        cd staging; zip shares-windows.zip shares.exe
+        tar -cvzf shares-windows.tar.gz shares.exe
+        rm shares.exe
+    - name: Build-musl macOS x86
+      uses: Shogan/rust-musl-action@v1.0.2
+      with:
+        args:
+          cargo build --target x86_64-apple-darwin --verbose --release
+    - name: Create MacOS artifacts
+      run: |
+        cp target/x86_64-apple-darwin/release/shares staging/shares
+        cd staging
+        zip shares-macos.zip shares
+        tar -cvzf shares-macos.tar.gz shares
+        rm shares
+    - uses: actions/upload-artifact@v2
+      with:
+        name: package
+        path: staging
