@@ -40,8 +40,8 @@ fn is_authed_header<'a>(data: &'a Config, request: &HttpRequest) -> Option<&'a U
     let username = headers.get("username").map(|user| user.to_str().unwrap());
     let auth = headers.get("auth").map(|user| user.to_str().unwrap());
 
-    if username.is_some() && auth.is_some() {
-        is_authed(data, &username.unwrap(), &auth.unwrap())
+    if let (Some(username), Some(auth)) = (username, auth) {
+        is_authed(data, username, auth)
     } else {
         None
     }
@@ -51,7 +51,7 @@ fn is_authed_query<'a>(data: &'a Config, auth_query: &AuthQuery) -> Option<&'a U
     let username = auth_query.username.as_str();
     let auth = auth_query.auth.as_str();
 
-    is_authed(data, &username, &auth)
+    is_authed(data, username, auth)
 }
 
 #[actix_web::main]
@@ -207,7 +207,7 @@ mod tests {
             )
             .await;
 
-            let (user, _) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, _) = *(&config.users).iter().peekable().peek().unwrap();
             let req = test::TestRequest::get()
                 .uri(&*format!("/{}/bucket/file.txt", user))
                 .to_request();
@@ -243,7 +243,7 @@ mod tests {
             .await;
 
             let filename = "file.txt";
-            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, user_data) = *(&config.users).iter().peekable().peek().unwrap();
             let user_dir = UserDir::new(&config, user_data);
             let bucket = Bucket::new(&user_dir, None).unwrap();
             let storage_file = StorageFile::new(&bucket, filename.into());
@@ -287,7 +287,7 @@ mod tests {
             .await;
 
             let filename = "file.txt";
-            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, user_data) = *(&config.users).iter().peekable().peek().unwrap();
             let user_dir = UserDir::new(&config, user_data);
             let bucket = Bucket::new(&user_dir, None).unwrap();
             let storage_file = StorageFile::new(&bucket, filename.into());
@@ -322,7 +322,7 @@ mod tests {
             )
             .await;
 
-            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, user_data) = *(&config.users).iter().peekable().peek().unwrap();
             let req = test::TestRequest::get()
                 .uri(&*format!(
                     "/delete/bucket/file.txt?username={}&auth={}",
@@ -344,7 +344,7 @@ mod tests {
             )
             .await;
 
-            let (user, _) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, _) = *(&config.users).iter().peekable().peek().unwrap();
             let req = test::TestRequest::get()
                 .uri(&*format!(
                     "/delete/bucket/file.txt?username={}&auth=456",
@@ -366,7 +366,7 @@ mod tests {
             )
             .await;
 
-            let (_, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (_, user_data) = *(&config.users).iter().peekable().peek().unwrap();
             let req = test::TestRequest::get()
                 .uri(&*format!(
                     "/delete/bucket/file.txt?username=someone&auth={}",
@@ -414,7 +414,7 @@ mod tests {
             .await;
 
             let filename = "file.txt";
-            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, user_data) = *(&config.users).iter().peekable().peek().unwrap();
             let user_dir = UserDir::new(&config, user_data);
             let bucket = Bucket::new(&user_dir, None).unwrap();
             let storage_file = StorageFile::new(&bucket, filename.into());
@@ -448,7 +448,7 @@ mod tests {
             )
             .await;
 
-            let (user, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, user_data) = *(&config.users).iter().peekable().peek().unwrap();
             let req = test::TestRequest::delete()
                 .uri("/bucket/file.txt")
                 .insert_header(("username", user.clone()))
@@ -487,7 +487,7 @@ mod tests {
             )
             .await;
 
-            let (user, _) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (user, _) = *(&config.users).iter().peekable().peek().unwrap();
             let req = test::TestRequest::delete()
                 .uri("/bucket/file.txt")
                 .insert_header(("username", user.clone()))
@@ -507,7 +507,7 @@ mod tests {
             )
             .await;
 
-            let (_, user_data) = *(&config.users).into_iter().peekable().peek().unwrap();
+            let (_, user_data) = *(&config.users).iter().peekable().peek().unwrap();
             let req = test::TestRequest::delete()
                 .uri("/bucket/file.txt")
                 .insert_header(("auth", user_data.key.clone()))

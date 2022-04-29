@@ -34,10 +34,11 @@ impl<'a, 'b> UserDir<'a, 'b> {
                 .unwrap_or(());
         }
 
-        if {
+        let exists = {
             let path = path.clone();
             web::block(move || path.exists()).await.unwrap()
-        } {
+        };
+        if exists {
             Some(path)
         } else {
             None
@@ -105,10 +106,11 @@ impl<'a, 'b, 'c> Bucket<'a, 'b, 'c> {
                     .unwrap_or(());
             }
 
-            if {
+            let exists = {
                 let path = path.clone();
                 web::block(move || path.exists()).await.unwrap()
-            } {
+            };
+            if exists {
                 Some(path)
             } else {
                 None
@@ -160,29 +162,28 @@ impl<'a, 'b, 'c, 'd> StorageFile<'a, 'b, 'c, 'd> {
         if let Some(path) = self.bucket.open(create).await {
             let path = path.join(&self.name);
 
-            if {
+            let exists = {
                 let path = path.clone();
                 web::block(move || path.exists()).await.unwrap()
-            } {
+            };
+            if exists {
                 if create {
                     None
                 } else {
                     web::block(move || File::open(&path))
                         .await
                         .unwrap()
-                        .map(|file| Some(file))
+                        .map(Some)
                         .unwrap_or(None)
                 }
+            } else if create {
+                web::block(move || File::create(&path))
+                    .await
+                    .unwrap()
+                    .map(Some)
+                    .unwrap_or(None)
             } else {
-                if create {
-                    web::block(move || File::create(&path))
-                        .await
-                        .unwrap()
-                        .map(|file| Some(file))
-                        .unwrap_or(None)
-                } else {
-                    None
-                }
+                None
             }
         } else {
             None
@@ -193,10 +194,11 @@ impl<'a, 'b, 'c, 'd> StorageFile<'a, 'b, 'c, 'd> {
         if let Some(path) = self.bucket.open(create).await {
             let path = path.join(&self.name);
 
-            if {
+            let exists = {
                 let path = path.clone();
                 web::block(move || path.exists()).await.unwrap()
-            } {
+            };
+            if exists {
                 Some(path)
             } else {
                 None
